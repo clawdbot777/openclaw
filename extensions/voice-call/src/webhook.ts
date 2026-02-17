@@ -11,6 +11,7 @@ import type { CoreConfig } from "./core-bridge.js";
 import type { CallManager } from "./manager.js";
 import type { MediaStreamConfig } from "./media-stream.js";
 import { MediaStreamHandler } from "./media-stream.js";
+import { buildMediaStreamConfig } from "./media-stream-config.js";
 import type { VoiceCallProvider } from "./providers/base.js";
 import { OpenAIRealtimeSTTProvider } from "./providers/stt-openai-realtime.js";
 import type { TwilioProvider } from "./providers/twilio.js";
@@ -58,116 +59,16 @@ export class VoiceCallWebhookServer {
   }
 
   /**
-   * Initialize media streaming with OpenAI Realtime STT.
+   * Initialize media streaming (supports both legacy STT+TTS and Voice Agent API).
    */
   private initializeMediaStreaming(): void {
-    const apiKey = this.config.streaming?.openaiApiKey || process.env.OPENAI_API_KEY;
+    // Use the unified config builder (supports both legacy and agent modes)
+    const streamConfig = buildMediaStreamConfig(this.config, this.manager, this.provider);
 
-    if (!apiKey) {
-      console.warn("[voice-call] Streaming enabled but no OpenAI API key found");
+    if (!streamConfig) {
+      console.warn("[voice-call] Failed to build media stream config");
       return;
     }
-
-    const sttProvider = new OpenAIRealtimeSTTProvider({
-      apiKey,
-      model: this.config.streaming?.sttModel,
-      silenceDurationMs: this.config.streaming?.silenceDurationMs,
-      vadThreshold: this.config.streaming?.vadThreshold,
-    });
-
-    const streamConfig: MediaStreamConfig = {
-      sttProvider,
-      shouldAcceptStream: ({ callId, token }) => {
-        const call = this.manager.getCallByProviderCallId(callId);
-        if (!call) {
-          return false;
-        }
-        if (this.provider.name === "twilio") {
-          const twilio = this.provider as TwilioProvider;
-          if (!twilio.isValidStreamToken(callId, token)) {
-            console.warn(`[voice-call] Rejecting media stream: invalid token for ${callId}`);
-            return false;
-          }
-        }
-        return true;
-      },
-      onTranscript: (providerCallId, transcript) => {
-        console.log(`[voice-call] Transcript for ${providerCallId}: ${transcript}`);
-
-        // Clear TTS queue on barge-in (user started speaking, interrupt current playback)
-        if (this.provider.name === "twilio") {
-          (this.provider as TwilioProvider).clearTtsQueue(providerCallId);
-        }
-
-        // Look up our internal call ID from the provider call ID
-        const call = this.manager.getCallByProviderCallId(providerCallId);
-        if (!call) {
-          console.warn(`[voice-call] No active call found for provider ID: ${providerCallId}`);
-          return;
-        }
-
-        // Create a speech event and process it through the manager
-        const event: NormalizedEvent = {
-          id: `stream-transcript-${Date.now()}`,
-          type: "call.speech",
-          callId: call.callId,
-          providerCallId,
-          timestamp: Date.now(),
-          transcript,
-          isFinal: true,
-        };
-        this.manager.processEvent(event);
-
-        // Auto-respond in conversation mode (inbound always, outbound if mode is conversation)
-        const callMode = call.metadata?.mode as string | undefined;
-        const shouldRespond = call.direction === "inbound" || callMode === "conversation";
-        if (shouldRespond) {
-          this.handleInboundResponse(call.callId, transcript).catch((err) => {
-            console.warn(`[voice-call] Failed to auto-respond:`, err);
-          });
-        }
-      },
-      onSpeechStart: (providerCallId) => {
-        if (this.provider.name === "twilio") {
-          (this.provider as TwilioProvider).clearTtsQueue(providerCallId);
-        }
-      },
-      onPartialTranscript: (callId, partial) => {
-        console.log(`[voice-call] Partial for ${callId}: ${partial}`);
-      },
-      onConnect: (callId, streamSid) => {
-        console.log(`[voice-call] Media stream connected: ${callId} -> ${streamSid}`);
-        // Register stream with provider for TTS routing
-        if (this.provider.name === "twilio") {
-          (this.provider as TwilioProvider).registerCallStream(callId, streamSid);
-        }
-
-        // Speak initial message if one was provided when call was initiated
-        // Use setTimeout to allow stream setup to complete
-        setTimeout(() => {
-          this.manager.speakInitialMessage(callId).catch((err) => {
-            console.warn(`[voice-call] Failed to speak initial message:`, err);
-          });
-        }, 500);
-      },
-      onDisconnect: (callId) => {
-        console.log(`[voice-call] Media stream disconnected: ${callId}`);
-        // Auto-end call when media stream disconnects to prevent stuck calls.
-        // Without this, calls can remain active indefinitely after the stream closes.
-        const disconnectedCall = this.manager.getCallByProviderCallId(callId);
-        if (disconnectedCall) {
-          console.log(
-            `[voice-call] Auto-ending call ${disconnectedCall.callId} on stream disconnect`,
-          );
-          void this.manager.endCall(disconnectedCall.callId).catch((err) => {
-            console.warn(`[voice-call] Failed to auto-end call ${disconnectedCall.callId}:`, err);
-          });
-        }
-        if (this.provider.name === "twilio") {
-          (this.provider as TwilioProvider).unregisterCallStream(callId);
-        }
-      },
-    };
 
     this.mediaStreamHandler = new MediaStreamHandler(streamConfig);
     console.log("[voice-call] Media streaming initialized");

@@ -81,6 +81,7 @@ function buildLegacyMediaStreamConfig(
 
   return {
     sttProvider,
+    voiceConfig: config, // Pass config for mode detection
     shouldAcceptStream: (params) => {
       const call = manager.getCallByProviderCallId(params.callId);
       if (!call) {
@@ -149,6 +150,7 @@ function buildVoiceAgentMediaStreamConfig(
 
   return {
     sttProvider: dummySTT, // Not used in agent mode
+    voiceConfig: config, // Pass config for agent mode detection
     shouldAcceptStream: (params) => {
       const call = manager.getCallByProviderCallId(params.callId);
       if (!call) {

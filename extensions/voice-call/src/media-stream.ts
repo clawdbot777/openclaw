@@ -1,10 +1,11 @@
 /**
  * Media Stream Handler
  *
- * Handles bidirectional audio streaming between Twilio and the AI services.
+ * Handles bidirectional audio streaming between Twilio and AI services.
+ * Supports both legacy STT+TTS mode and Voice Agent API mode.
  * - Receives mu-law audio from Twilio via WebSocket
- * - Forwards to OpenAI Realtime STT for transcription
- * - Sends TTS audio back to Twilio
+ * - Legacy: Forwards to STT for transcription, TTS for speech
+ * - Agent: Forwards to unified Voice Agent provider
  */
 
 import type { IncomingMessage } from "node:http";
@@ -14,13 +15,18 @@ import type {
   OpenAIRealtimeSTTProvider,
   RealtimeSTTSession,
 } from "./providers/stt-openai-realtime.js";
+import type { IVoiceAgentProvider } from "./providers/voice-agent/base.js";
+import type { VoiceCallConfig } from "./config.js";
+import { isVoiceAgentApiMode, initializeVoiceAgentProvider } from "./voice-agent-mode.js";
 
 /**
  * Configuration for the media stream handler.
  */
 export interface MediaStreamConfig {
-  /** STT provider for transcription */
+  /** STT provider for transcription (legacy mode) */
   sttProvider: OpenAIRealtimeSTTProvider;
+  /** Optional: Voice call config (for agent mode detection) */
+  voiceConfig?: VoiceCallConfig;
   /** Validate whether to accept a media stream for the given call ID */
   shouldAcceptStream?: (params: { callId: string; streamSid: string; token?: string }) => boolean;
   /** Callback when transcript is received */
@@ -36,13 +42,15 @@ export interface MediaStreamConfig {
 }
 
 /**
- * Active media stream session.
+ * Active media stream session (supports both legacy and agent modes).
  */
 interface StreamSession {
   callId: string;
   streamSid: string;
   ws: WebSocket;
-  sttSession: RealtimeSTTSession;
+  mode: "legacy" | "agent";
+  sttSession?: RealtimeSTTSession; // Legacy mode only
+  agentProvider?: IVoiceAgentProvider; // Agent mode only
 }
 
 type TtsQueueEntry = {
@@ -106,9 +114,15 @@ export class MediaStreamHandler {
 
           case "media":
             if (session && message.media?.payload) {
-              // Forward audio to STT
               const audioBuffer = Buffer.from(message.media.payload, "base64");
-              session.sttSession.sendAudio(audioBuffer);
+              
+              if (session.mode === "agent" && session.agentProvider) {
+                // Agent mode: send to voice agent
+                session.agentProvider.sendAudio(audioBuffer);
+              } else if (session.mode === "legacy" && session.sttSession) {
+                // Legacy mode: send to STT
+                session.sttSession.sendAudio(audioBuffer);
+              }
             }
             break;
 
@@ -136,7 +150,7 @@ export class MediaStreamHandler {
   }
 
   /**
-   * Handle stream start event.
+   * Handle stream start event (supports both legacy and agent modes).
    */
   private async handleStart(
     ws: WebSocket,
@@ -166,50 +180,103 @@ export class MediaStreamHandler {
       return null;
     }
 
-    // Create STT session
-    const sttSession = this.config.sttProvider.createSession();
+    // Detect mode: Voice Agent API or legacy STT+TTS
+    const isAgentMode = this.config.voiceConfig && isVoiceAgentApiMode(this.config.voiceConfig);
 
-    // Set up transcript callbacks
-    sttSession.onPartial((partial) => {
-      this.config.onPartialTranscript?.(callSid, partial);
-    });
+    let session: StreamSession;
 
-    sttSession.onTranscript((transcript) => {
-      this.config.onTranscript?.(callSid, transcript);
-    });
+    if (isAgentMode) {
+      // Voice Agent API mode
+      try {
+        const agentProvider = await initializeVoiceAgentProvider(this.config.voiceConfig!);
+        console.log(`[MediaStream] Voice Agent provider initialized for call ${callSid}`);
 
-    sttSession.onSpeechStart(() => {
-      this.config.onSpeechStart?.(callSid);
-    });
+        // Set up agent event handlers
+        agentProvider.on("agent_audio", (audio) => {
+          // Forward agent audio to Twilio
+          const base64Audio = audio.toString("base64");
+          ws.send(
+            JSON.stringify({
+              event: "media",
+              streamSid,
+              media: { payload: base64Audio },
+            }),
+          );
+        });
 
-    const session: StreamSession = {
-      callId: callSid,
-      streamSid,
-      ws,
-      sttSession,
-    };
+        agentProvider.on("transcript", (data) => {
+          this.config.onTranscript?.(callSid, data.text);
+        });
+
+        agentProvider.on("user_started_speaking", () => {
+          this.config.onSpeechStart?.(callSid);
+        });
+
+        session = {
+          callId: callSid,
+          streamSid,
+          ws,
+          mode: "agent",
+          agentProvider,
+        };
+      } catch (err) {
+        console.error(`[MediaStream] Failed to initialize agent for ${callSid}:`, err);
+        ws.close(1011, "Agent initialization failed");
+        return null;
+      }
+    } else {
+      // Legacy STT+TTS mode
+      const sttSession = this.config.sttProvider.createSession();
+
+      // Set up transcript callbacks
+      sttSession.onPartial((partial) => {
+        this.config.onPartialTranscript?.(callSid, partial);
+      });
+
+      sttSession.onTranscript((transcript) => {
+        this.config.onTranscript?.(callSid, transcript);
+      });
+
+      sttSession.onSpeechStart(() => {
+        this.config.onSpeechStart?.(callSid);
+      });
+
+      session = {
+        callId: callSid,
+        streamSid,
+        ws,
+        mode: "legacy",
+        sttSession,
+      };
+
+      // Connect to STT (non-blocking, log errors but don't fail the call)
+      sttSession.connect().catch((err) => {
+        console.warn(`[MediaStream] STT connection failed (TTS still works):`, err.message);
+      });
+    }
 
     this.sessions.set(streamSid, session);
 
-    // Notify connection BEFORE STT connect so TTS can work even if STT fails
+    // Notify connection
     this.config.onConnect?.(callSid, streamSid);
-
-    // Connect to OpenAI STT (non-blocking, log errors but don't fail the call)
-    sttSession.connect().catch((err) => {
-      console.warn(`[MediaStream] STT connection failed (TTS still works):`, err.message);
-    });
 
     return session;
   }
 
   /**
-   * Handle stream stop event.
+   * Handle stream stop event (supports both modes).
    */
   private handleStop(session: StreamSession): void {
     console.log(`[MediaStream] Stream stopped: ${session.streamSid}`);
 
     this.clearTtsState(session.streamSid);
-    session.sttSession.close();
+    
+    if (session.mode === "agent" && session.agentProvider) {
+      session.agentProvider.close();
+    } else if (session.mode === "legacy" && session.sttSession) {
+      session.sttSession.close();
+    }
+    
     this.sessions.delete(session.streamSid);
     this.config.onDisconnect?.(session.callId);
   }
