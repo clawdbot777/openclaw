@@ -84,7 +84,7 @@ export class DeepgramTTSProvider {
    * Generate speech audio from text.
    * Returns mu-law audio data (8kHz, mono) ready for Twilio.
    */
-  async synthesize(text: string): Promise<Buffer> {
+  async synthesize(text: string, retries = 2): Promise<Buffer> {
     const params = new URLSearchParams({
       model: this.voice,
       encoding: this.encoding,
@@ -92,22 +92,45 @@ export class DeepgramTTSProvider {
       container: this.container,
     });
 
-    const response = await fetch(`https://api.deepgram.com/v1/speak?${params.toString()}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Token ${this.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ text }),
-    });
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        // Create abort controller for timeout
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000); // 5 second timeout
 
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Deepgram TTS failed: ${response.status} - ${error}`);
+        const response = await fetch(`https://api.deepgram.com/v1/speak?${params.toString()}`, {
+          method: "POST",
+          headers: {
+            Authorization: `Token ${this.apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text }),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(`Deepgram TTS failed: ${response.status} - ${error}`);
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        return Buffer.from(arrayBuffer);
+      } catch (err) {
+        const isLastAttempt = attempt === retries;
+        if (isLastAttempt) {
+          console.error(`[deepgram-tts] All ${retries + 1} attempts failed:`, err);
+          throw err;
+        }
+        console.warn(`[deepgram-tts] Attempt ${attempt + 1} failed, retrying...`, err);
+        // Wait before retry (exponential backoff)
+        await new Promise((r) => setTimeout(r, Math.min(1000 * 2 ** attempt, 3000)));
+      }
     }
 
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    // TypeScript needs this, but we'll never reach here
+    throw new Error("Unexpected: retry loop exited without return");
   }
 
   /**

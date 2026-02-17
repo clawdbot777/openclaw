@@ -107,6 +107,7 @@ class DeepgramSTTSessionImpl implements DeepgramSTTSession {
   private closed = false;
   private explicitClose = false; // Track whether close() was called intentionally
   private reconnectAttempts = 0;
+  private reconnecting = false; // Prevent multiple concurrent reconnection attempts
   private onTranscriptCallback: ((transcript: string) => void) | null = null;
   private onPartialCallback: ((partial: string) => void) | null = null;
   private onSpeechStartCallback: (() => void) | null = null;
@@ -114,6 +115,7 @@ class DeepgramSTTSessionImpl implements DeepgramSTTSession {
   private transcriptResolvers: Array<(value: string) => void> = [];
   private audioBuffer: Buffer[] = []; // Buffer audio packets until WebSocket is connected
   private currentTranscript = ""; // Accumulate transcript for UtteranceEnd fallback
+  private currentUtteranceFired = false; // Prevent duplicate firing from speech_final + UtteranceEnd
 
   constructor(
     private readonly apiKey: string,
@@ -152,6 +154,8 @@ class DeepgramSTTSessionImpl implements DeepgramSTTSession {
 
       this.ws.on("open", () => {
         this.connected = true;
+        console.log("[deepgram-stt] Connected, flushing audio buffer...");
+        this.flushAudioBuffer();
         resolve();
       });
 
@@ -183,6 +187,20 @@ class DeepgramSTTSessionImpl implements DeepgramSTTSession {
     });
   }
 
+  private fireTranscript(transcript: string): void {
+    // Fire transcript callback
+    if (this.onTranscriptCallback) {
+      this.onTranscriptCallback(transcript);
+    }
+    // Resolve any waiting promises
+    const resolver = this.transcriptResolvers.shift();
+    if (resolver) {
+      resolver(transcript);
+    } else {
+      this.transcriptQueue.push(transcript);
+    }
+  }
+
   private handleMessage(message: any): void {
     // Handle transcript results
     if (message.type === "Results") {
@@ -202,16 +220,10 @@ class DeepgramSTTSessionImpl implements DeepgramSTTSession {
 
       // CASE 1: Standard endpointing (clean audio, normal silence detection)
       if (isFinal && speechFinal) {
-        // Fire transcript callback
-        if (this.onTranscriptCallback) {
-          this.onTranscriptCallback(this.currentTranscript);
-        }
-        // Resolve any waiting promises
-        const resolver = this.transcriptResolvers.shift();
-        if (resolver) {
-          resolver(this.currentTranscript);
-        } else {
-          this.transcriptQueue.push(this.currentTranscript);
+        // Only fire if we haven't already fired for this utterance
+        if (!this.currentUtteranceFired) {
+          this.fireTranscript(this.currentTranscript);
+          this.currentUtteranceFired = true;
         }
         // Clear accumulated transcript
         this.currentTranscript = "";
@@ -226,25 +238,19 @@ class DeepgramSTTSessionImpl implements DeepgramSTTSession {
     // CASE 2: UtteranceEnd (noisy phone lines, word-gap detection)
     // This fires when no new words detected for utterance_end_ms (1000ms)
     if (message.type === "UtteranceEnd") {
-      if (this.currentTranscript.length > 0) {
-        // Fire transcript callback with accumulated transcript
-        if (this.onTranscriptCallback) {
-          this.onTranscriptCallback(this.currentTranscript);
-        }
-        // Resolve any waiting promises
-        const resolver = this.transcriptResolvers.shift();
-        if (resolver) {
-          resolver(this.currentTranscript);
-        } else {
-          this.transcriptQueue.push(this.currentTranscript);
-        }
-        // Clear accumulated transcript
-        this.currentTranscript = "";
+      // Only fire if we have a transcript AND haven't already fired for this utterance
+      if (this.currentTranscript.length > 0 && !this.currentUtteranceFired) {
+        this.fireTranscript(this.currentTranscript);
       }
+      // Clear accumulated transcript and reset flag for next utterance
+      this.currentTranscript = "";
+      this.currentUtteranceFired = false;
     }
 
     // Handle speech start detection
     if (message.type === "SpeechStarted") {
+      // Reset flag when new speech starts
+      this.currentUtteranceFired = false;
       if (this.onSpeechStartCallback) {
         this.onSpeechStartCallback();
       }
@@ -259,27 +265,28 @@ class DeepgramSTTSessionImpl implements DeepgramSTTSession {
     }
   }
 
-  sendAudio(audio: Buffer): void {
-    if (!this.ws || !this.connected) {
-      // Buffer audio instead of throwing error
-      this.audioBuffer.push(audio);
-      // Prevent memory leak - keep only last 50 packets (~1 second)
-      if (this.audioBuffer.length > 50) {
-        this.audioBuffer.shift();
-      }
-      return;
-    }
-
-    // Flush buffered audio on first successful send
-    if (this.audioBuffer.length > 0) {
-      console.log(`[deepgram-stt] Flushing ${this.audioBuffer.length} buffered audio packets`);
+  private flushAudioBuffer(): void {
+    if (this.audioBuffer.length > 0 && this.ws && this.connected) {
+      console.log(`[deepgram-stt] Flushing ${this.audioBuffer.length} buffered packets`);
       for (const packet of this.audioBuffer) {
         this.ws.send(packet);
       }
       this.audioBuffer = [];
     }
+  }
 
-    // Send current audio
+  sendAudio(audio: Buffer): void {
+    if (!this.ws || !this.connected) {
+      // Buffer audio instead of throwing error
+      this.audioBuffer.push(audio);
+      // Prevent memory leak - keep only last 100 packets (~2 seconds)
+      if (this.audioBuffer.length > 100) {
+        this.audioBuffer.shift();
+      }
+      return;
+    }
+
+    // Send current audio (buffer is flushed in connect())
     this.ws.send(audio);
   }
 
@@ -319,13 +326,16 @@ class DeepgramSTTSessionImpl implements DeepgramSTTSession {
   }
 
   private async attemptReconnect(): Promise<void> {
-    if (this.closed || this.explicitClose) return;
+    if (this.closed || this.explicitClose || this.reconnecting) return;
+
+    this.reconnecting = true;
 
     if (this.reconnectAttempts >= DeepgramSTTSessionImpl.MAX_RECONNECT_ATTEMPTS) {
       console.error(
         `[deepgram-stt] Max reconnect attempts (${DeepgramSTTSessionImpl.MAX_RECONNECT_ATTEMPTS}) reached`,
       );
       this.closed = true;
+      this.reconnecting = false;
       return;
     }
 
@@ -342,8 +352,10 @@ class DeepgramSTTSessionImpl implements DeepgramSTTSession {
       await this.connect();
       console.log("[deepgram-stt] Reconnection successful");
       this.reconnectAttempts = 0; // Reset on successful reconnection
+      this.reconnecting = false;
     } catch (err) {
       console.error("[deepgram-stt] Reconnection failed:", err);
+      this.reconnecting = false;
       void this.attemptReconnect(); // Try again
     }
   }
