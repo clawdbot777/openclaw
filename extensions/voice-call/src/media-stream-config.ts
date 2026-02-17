@@ -9,7 +9,6 @@ import type { MediaStreamConfig } from "./media-stream.js";
 import type { VoiceCallConfig } from "./config.js";
 import type { CallManager } from "./manager.js";
 import { OpenAIRealtimeSTTProvider } from "./providers/stt-openai-realtime.js";
-import { DeepgramSTTProvider } from "./providers/stt-deepgram.js";
 import { isVoiceAgentApiMode } from "./voice-agent-mode.js";
 import type { TwilioProvider } from "./providers/twilio.js";
 
@@ -47,37 +46,24 @@ function buildLegacyMediaStreamConfig(
 ): MediaStreamConfig | null {
   const sttProviderType = config.streaming?.sttProvider || "openai-realtime";
 
-  let sttProvider: any;
-
-  if (sttProviderType === "openai-realtime") {
-    const apiKey = config.streaming?.openaiApiKey || process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      console.warn("[voice-call] OpenAI streaming enabled but no API key found");
-      return null;
-    }
-
-    sttProvider = new OpenAIRealtimeSTTProvider({
-      apiKey,
-      model: config.streaming?.sttModel,
-      silenceDurationMs: config.streaming?.silenceDurationMs,
-      vadThreshold: config.streaming?.vadThreshold,
-    });
-  } else if (sttProviderType === "deepgram") {
-    const apiKey = config.streaming?.deepgramApiKey || process.env.DEEPGRAM_API_KEY;
-    if (!apiKey) {
-      console.warn("[voice-call] Deepgram streaming enabled but no API key found");
-      return null;
-    }
-
-    sttProvider = new DeepgramSTTProvider({
-      apiKey,
-      model: config.streaming?.deepgramModel || "nova-2",
-      language: config.streaming?.deepgramLanguage || "en-US",
-    });
-  } else {
-    console.warn(`[voice-call] Unknown STT provider: ${sttProviderType}`);
+  // Only OpenAI Realtime is currently supported for legacy streaming
+  if (sttProviderType !== "openai-realtime") {
+    console.warn(`[voice-call] Only openai-realtime is supported for legacy streaming, got: ${sttProviderType}`);
     return null;
   }
+
+  const apiKey = config.streaming?.openaiApiKey || process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    console.warn("[voice-call] OpenAI streaming enabled but no API key found");
+    return null;
+  }
+
+  const sttProvider = new OpenAIRealtimeSTTProvider({
+    apiKey,
+    model: config.streaming?.sttModel,
+    silenceDurationMs: config.streaming?.silenceDurationMs,
+    vadThreshold: config.streaming?.vadThreshold,
+  });
 
   return {
     sttProvider,
