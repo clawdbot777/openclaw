@@ -5,6 +5,10 @@ import {
   TtsProviderSchema,
 } from "openclaw/plugin-sdk";
 import { z } from "zod";
+import {
+  VoiceProviderTypeSchema,
+  VoiceAgentApiConfigSchema,
+} from "./config-agent.js";
 
 // -----------------------------------------------------------------------------
 // Phone Number Validation
@@ -243,6 +247,12 @@ export const VoiceCallConfigSchema = z
     /** Active provider (telnyx, twilio, plivo, or mock) */
     provider: z.enum(["telnyx", "twilio", "plivo", "mock"]).optional(),
 
+    /** Voice provider type: legacy (STT+TTS) or agent API (unified) */
+    voiceProviderType: VoiceProviderTypeSchema.default("legacy-stt-tts"),
+
+    /** Voice Agent API configuration (when voiceProviderType="voice-agent-api") */
+    voiceAgentApi: VoiceAgentApiConfigSchema.optional(),
+
     /** Telnyx-specific configuration */
     telnyx: TelnyxConfigSchema.optional(),
 
@@ -335,6 +345,10 @@ export const VoiceCallConfigSchema = z
   .strict();
 
 export type VoiceCallConfig = z.infer<typeof VoiceCallConfigSchema>;
+
+// Re-export voice agent API types
+export { VoiceProviderTypeSchema, VoiceAgentApiConfigSchema } from "./config-agent.js";
+export type { VoiceProviderType, VoiceAgentApiConfig } from "./config-agent.js";
 
 // -----------------------------------------------------------------------------
 // Configuration Helpers
