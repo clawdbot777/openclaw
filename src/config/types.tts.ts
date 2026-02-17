@@ -1,4 +1,4 @@
-export type TtsProvider = "elevenlabs" | "openai" | "edge";
+export type TtsProvider = "elevenlabs" | "openai" | "edge" | "deepgram";
 
 export type TtsMode = "final" | "all";
 
@@ -72,6 +72,15 @@ export type TtsConfig = {
     saveSubtitles?: boolean;
     proxy?: string;
     timeoutMs?: number;
+  };
+  /** Deepgram Aura TTS configuration. */
+  deepgram?: {
+    apiKey?: string;
+    voice?: string;
+    model?: string;
+    encoding?: string;
+    sampleRate?: number;
+    container?: string;
   };
   /** Optional path for local TTS user preferences JSON. */
   prefsPath?: string;

@@ -86,13 +86,33 @@
       "label": "Enable Streaming",
       "advanced": true
     },
+    "streaming.sttProvider": {
+      "label": "STT Provider",
+      "help": "Choose openai-realtime or deepgram for speech recognition",
+      "advanced": true
+    },
     "streaming.openaiApiKey": {
       "label": "OpenAI Realtime API Key",
       "sensitive": true,
       "advanced": true
     },
     "streaming.sttModel": {
-      "label": "Realtime STT Model",
+      "label": "OpenAI Realtime STT Model",
+      "advanced": true
+    },
+    "streaming.deepgramApiKey": {
+      "label": "Deepgram API Key",
+      "sensitive": true,
+      "advanced": true
+    },
+    "streaming.deepgramModel": {
+      "label": "Deepgram Model",
+      "help": "Default: nova-2",
+      "advanced": true
+    },
+    "streaming.deepgramLanguage": {
+      "label": "Deepgram Language",
+      "help": "Default: en-US",
       "advanced": true
     },
     "streaming.streamPath": {
@@ -132,6 +152,21 @@
     },
     "tts.elevenlabs.baseUrl": {
       "label": "ElevenLabs Base URL",
+      "advanced": true
+    },
+    "tts.deepgram.apiKey": {
+      "label": "Deepgram API Key",
+      "sensitive": true,
+      "advanced": true
+    },
+    "tts.deepgram.voice": {
+      "label": "Deepgram Voice",
+      "help": "Aura voice (e.g. aura-arcas-en, aura-asteria-en)",
+      "advanced": true
+    },
+    "tts.deepgram.model": {
+      "label": "Deepgram Model",
+      "help": "Default: aura",
       "advanced": true
     },
     "publicUrl": {
@@ -322,7 +357,7 @@
           },
           "sttProvider": {
             "type": "string",
-            "enum": ["openai-realtime"]
+            "enum": ["openai-realtime", "deepgram"]
           },
           "openaiApiKey": {
             "type": "string"
@@ -340,6 +375,25 @@
             "maximum": 1
           },
           "streamPath": {
+            "type": "string"
+          },
+          "deepgramApiKey": {
+            "type": "string"
+          },
+          "deepgramModel": {
+            "type": "string"
+          },
+          "deepgramLanguage": {
+            "type": "string"
+          },
+          "ttsProvider": {
+            "type": "string",
+            "enum": ["deepgram", "openai"]
+          },
+          "deepgramTtsVoice": {
+            "type": "string"
+          },
+          "deepgramTtsModel": {
             "type": "string"
           }
         }

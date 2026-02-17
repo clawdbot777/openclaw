@@ -13,6 +13,7 @@ import { startTunnel, type TunnelResult } from "./tunnel.js";
 import {
   cleanupTailscaleExposure,
   setupTailscaleExposure,
+  setupTailscaleExposureRoute,
   VoiceCallWebhookServer,
 } from "./webhook.js";
 
@@ -154,6 +155,16 @@ export async function createVoiceCallRuntime(params: {
     publicUrl = await setupTailscaleExposure(config);
   }
 
+  // Set up the stream path for WebSocket connections (always, if streaming enabled)
+  if (config.streaming?.enabled && config.tailscale?.mode !== "off") {
+    const streamPath = config.streaming.streamPath || "/voice/stream";
+    await setupTailscaleExposureRoute({
+      mode: config.tailscale.mode === "funnel" ? "funnel" : "serve",
+      path: streamPath,
+      localUrl: `http://127.0.0.1:${config.serve.port}`,
+    });
+  }
+
   const webhookUrl = publicUrl ?? localUrl;
 
   if (publicUrl && provider.name === "twilio") {
@@ -162,7 +173,26 @@ export async function createVoiceCallRuntime(params: {
 
   if (provider.name === "twilio" && config.streaming?.enabled) {
     const twilioProvider = provider as TwilioProvider;
-    if (ttsRuntime?.textToSpeechTelephony) {
+
+    // Choose TTS provider based on config
+    const ttsProviderType = config.streaming.ttsProvider || "openai";
+
+    if (ttsProviderType === "deepgram") {
+      // Use Deepgram TTS directly for streaming calls
+      try {
+        const { createDeepgramTelephonyTtsProvider } = await import("./telephony-tts.js");
+        const ttsProvider = createDeepgramTelephonyTtsProvider(config.streaming);
+        twilioProvider.setTTSProvider(ttsProvider);
+        log.info("[voice-call] Deepgram Telephony TTS provider configured");
+      } catch (err) {
+        log.warn(
+          `[voice-call] Failed to initialize Deepgram TTS: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    } else if (ttsRuntime?.textToSpeechTelephony) {
+      // Use core OpenClaw TTS (ElevenLabs, OpenAI, Edge TTS, etc.)
       try {
         const ttsProvider = createTelephonyTtsProvider({
           coreConfig,

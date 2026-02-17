@@ -12,6 +12,7 @@ import type { CallManager } from "./manager.js";
 import type { MediaStreamConfig } from "./media-stream.js";
 import { MediaStreamHandler } from "./media-stream.js";
 import type { VoiceCallProvider } from "./providers/base.js";
+import { DeepgramSTTProvider } from "./providers/stt-deepgram.js";
 import { OpenAIRealtimeSTTProvider } from "./providers/stt-openai-realtime.js";
 import type { TwilioProvider } from "./providers/twilio.js";
 import type { NormalizedEvent, WebhookContext } from "./types.js";
@@ -58,22 +59,41 @@ export class VoiceCallWebhookServer {
   }
 
   /**
-   * Initialize media streaming with OpenAI Realtime STT.
+   * Initialize media streaming with STT provider (OpenAI or Deepgram).
    */
   private initializeMediaStreaming(): void {
-    const apiKey = this.config.streaming?.openaiApiKey || process.env.OPENAI_API_KEY;
+    const sttProviderType = this.config.streaming?.sttProvider || "openai-realtime";
 
-    if (!apiKey) {
-      console.warn("[voice-call] Streaming enabled but no OpenAI API key found");
-      return;
+    let sttProvider: OpenAIRealtimeSTTProvider | DeepgramSTTProvider;
+
+    if (sttProviderType === "deepgram") {
+      const apiKey = this.config.streaming?.deepgramApiKey || process.env.DEEPGRAM_API_KEY;
+      if (!apiKey) {
+        console.warn("[voice-call] Streaming enabled but no Deepgram API key found");
+        return;
+      }
+
+      sttProvider = new DeepgramSTTProvider({
+        apiKey,
+        model: this.config.streaming?.deepgramModel,
+        language: this.config.streaming?.deepgramLanguage,
+        endpointing: this.config.streaming?.silenceDurationMs,
+      });
+    } else {
+      // Default to OpenAI Realtime
+      const apiKey = this.config.streaming?.openaiApiKey || process.env.OPENAI_API_KEY;
+      if (!apiKey) {
+        console.warn("[voice-call] Streaming enabled but no OpenAI API key found");
+        return;
+      }
+
+      sttProvider = new OpenAIRealtimeSTTProvider({
+        apiKey,
+        model: this.config.streaming?.sttModel,
+        silenceDurationMs: this.config.streaming?.silenceDurationMs,
+        vadThreshold: this.config.streaming?.vadThreshold,
+      });
     }
-
-    const sttProvider = new OpenAIRealtimeSTTProvider({
-      apiKey,
-      model: this.config.streaming?.sttModel,
-      silenceDurationMs: this.config.streaming?.silenceDurationMs,
-      vadThreshold: this.config.streaming?.vadThreshold,
-    });
 
     const streamConfig: MediaStreamConfig = {
       sttProvider,
@@ -142,13 +162,43 @@ export class VoiceCallWebhookServer {
           (this.provider as TwilioProvider).registerCallStream(callId, streamSid);
         }
 
-        // Speak initial message if one was provided when call was initiated
-        // Use setTimeout to allow stream setup to complete
-        setTimeout(() => {
-          this.manager.speakInitialMessage(callId).catch((err) => {
-            console.warn(`[voice-call] Failed to speak initial message:`, err);
-          });
-        }, 500);
+        // Try instant cached greeting for inbound calls (pre-generated at startup)
+        const cachedAudio =
+          this.provider.name === "twilio" &&
+          typeof (this.provider as any).getCachedGreetingAudio === "function"
+            ? (this.provider as any).getCachedGreetingAudio()
+            : null;
+        const call = this.manager.getCallByProviderCallId(callId);
+        if (cachedAudio && call?.metadata?.initialMessage && call.direction === "inbound") {
+          console.log(`[voice-call] Playing cached greeting (${cachedAudio.length} bytes)`);
+          // Clear initialMessage to prevent re-speaking via the fallback path.
+          // Note: this in-memory mutation is not persisted to disk, which is acceptable
+          // because a gateway restart would also sever the media stream, making replay moot.
+          delete call.metadata.initialMessage;
+          const handler = this.mediaStreamHandler!;
+          const CHUNK_SIZE = 160;
+          const CHUNK_DELAY_MS = 20;
+          void (async () => {
+            const { chunkAudio } = await import("./telephony-audio.js");
+            await handler.queueTts(streamSid, async (signal) => {
+              for (const chunk of chunkAudio(cachedAudio, CHUNK_SIZE)) {
+                if (signal.aborted) break;
+                handler.sendAudio(streamSid, chunk);
+                await new Promise((r) => setTimeout(r, CHUNK_DELAY_MS));
+              }
+              if (!signal.aborted) {
+                handler.sendMark(streamSid, `greeting-${Date.now()}`);
+              }
+            });
+          })().catch((err) => console.warn("[voice-call] Cached greeting playback failed:", err));
+        } else {
+          // Fallback: original path with reduced delay
+          setTimeout(() => {
+            this.manager.speakInitialMessage(callId).catch((err) => {
+              console.warn(`[voice-call] Failed to speak initial message:`, err);
+            });
+          }, 100);
+        }
       },
       onDisconnect: (callId) => {
         console.log(`[voice-call] Media stream disconnected: ${callId}`);
@@ -194,7 +244,8 @@ export class VoiceCallWebhookServer {
         this.server.on("upgrade", (request, socket, head) => {
           const url = new URL(request.url || "/", `http://${request.headers.host}`);
 
-          if (url.pathname === streamPath) {
+          // Accept WebSocket upgrades at root (Tailscale strips the mount prefix)
+          if (url.pathname === "/" || url.pathname === streamPath) {
             console.log("[voice-call] WebSocket upgrade for media stream");
             this.mediaStreamHandler?.handleUpgrade(request, socket, head);
           } else {
@@ -484,7 +535,6 @@ export async function setupTailscaleExposureRoute(opts: {
   const { code } = await runTailscaleCommand([
     opts.mode,
     "--bg",
-    "--yes",
     "--set-path",
     opts.path,
     opts.localUrl,

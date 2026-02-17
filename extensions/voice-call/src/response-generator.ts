@@ -124,7 +124,7 @@ export async function generateVoiceResponse(
       sessionKey,
       messageProvider: "voice",
       sessionFile,
-      workspaceDir,
+      workspaceDir: null, // Don't load workspace context for voice calls - too heavy, causes model compat issues
       config: cfg,
       prompt: userMessage,
       provider,

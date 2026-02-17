@@ -1,5 +1,6 @@
-import type { VoiceCallTtsConfig } from "./config.js";
+import type { VoiceCallTtsConfig, VoiceCallStreamingConfig } from "./config.js";
 import type { CoreConfig } from "./core-bridge.js";
+import { DeepgramTTSProvider } from "./providers/tts-deepgram.js";
 import { convertPcmToMulaw8k } from "./telephony-audio.js";
 
 export type TelephonyTtsRuntime = {
@@ -19,6 +20,34 @@ export type TelephonyTtsRuntime = {
 export type TelephonyTtsProvider = {
   synthesizeForTelephony: (text: string) => Promise<Buffer>;
 };
+
+/**
+ * Create a Deepgram-based telephony TTS provider for streaming calls.
+ * Uses Deepgram TTS API directly, configured for Twilio's µ-law format.
+ */
+export function createDeepgramTelephonyTtsProvider(
+  streamingConfig: VoiceCallStreamingConfig,
+): TelephonyTtsProvider {
+  const apiKey = streamingConfig.deepgramApiKey || process.env.DEEPGRAM_API_KEY;
+  if (!apiKey) {
+    throw new Error("Deepgram API key required for telephony TTS (set DEEPGRAM_API_KEY or config)");
+  }
+
+  const deepgramTts = new DeepgramTTSProvider({
+    apiKey,
+    voice: streamingConfig.deepgramTtsVoice || "aura-asteria-en",
+    model: streamingConfig.deepgramTtsModel || "aura-asteria-en",
+    encoding: "mulaw", // Twilio requires µ-law
+    sampleRate: 8000, // 8kHz for telephony
+    container: "none", // Raw audio, no container
+  });
+
+  return {
+    synthesizeForTelephony: async (text: string) => {
+      return await deepgramTts.synthesize(text);
+    },
+  };
+}
 
 export function createTelephonyTtsProvider(params: {
   coreConfig: CoreConfig;
