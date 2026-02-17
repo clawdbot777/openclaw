@@ -5,10 +5,54 @@ import {
   TtsProviderSchema,
 } from "openclaw/plugin-sdk";
 import { z } from "zod";
-import {
-  VoiceProviderTypeSchema,
-  VoiceAgentApiConfigSchema,
-} from "./config-agent.js";
+
+// Voice Agent API schemas (inlined to avoid module resolution issues)
+const VoiceProviderTypeSchema = z.enum(["legacy-stt-tts", "voice-agent-api"]);
+type VoiceProviderType = z.infer<typeof VoiceProviderTypeSchema>;
+
+const VoiceAgentApiConfigSchema = z
+  .object({
+    /** Provider (deepgram-agent, retell, vapi, etc.) */
+    provider: z.enum(["deepgram-agent"]).default("deepgram-agent"),
+    /** API key (uses DEEPGRAM_API_KEY env if not set) */
+    apiKey: z.string().min(1).optional(),
+    /** Agent configuration */
+    agent: z.object({
+      /** Language code */
+      language: z.string().default("en"),
+      /** Listen (STT) settings */
+      listen: z.object({
+        model: z.string().default("nova-3"),
+      }),
+      /** Think (LLM) settings */
+      think: z.object({
+        provider: z.enum(["open_ai", "anthropic", "custom"]).default("open_ai"),
+        model: z.string().default("gpt-4o-mini"),
+        /** Override system prompt (if not set, uses responseSystemPrompt) */
+        prompt: z.string().optional(),
+      }),
+      /** Speak (TTS) settings */
+      speak: z.object({
+        model: z.string().default("aura-2-helios-en"),
+      }),
+      /** Greeting message */
+      greeting: z.string().optional(),
+    }),
+    /** Audio settings */
+    audio: z.object({
+      input: z.object({
+        encoding: z.enum(["linear16", "mulaw"]).default("linear16"),
+        sample_rate: z.number().default(24000),
+      }),
+      output: z.object({
+        encoding: z.enum(["linear16", "mulaw"]).default("linear16"),
+        sample_rate: z.number().default(24000),
+        container: z.enum(["wav", "none"]).default("wav"),
+      }),
+    }),
+  })
+  .strict();
+type VoiceAgentApiConfig = z.infer<typeof VoiceAgentApiConfigSchema>;
 
 // -----------------------------------------------------------------------------
 // Phone Number Validation
@@ -346,9 +390,9 @@ export const VoiceCallConfigSchema = z
 
 export type VoiceCallConfig = z.infer<typeof VoiceCallConfigSchema>;
 
-// Re-export voice agent API types
-export { VoiceProviderTypeSchema, VoiceAgentApiConfigSchema } from "./config-agent.js";
-export type { VoiceProviderType, VoiceAgentApiConfig } from "./config-agent.js";
+// Re-export voice agent API types (now defined inline above)
+export { VoiceProviderTypeSchema, VoiceAgentApiConfigSchema };
+export type { VoiceProviderType, VoiceAgentApiConfig };
 
 // -----------------------------------------------------------------------------
 // Configuration Helpers
